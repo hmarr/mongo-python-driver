@@ -89,7 +89,7 @@ class Collection(object):
         command = SON({"create": self.__name})
         command.update(options)
 
-        self.__database._command(command)
+        self.__database.command(command)
 
     def __getattr__(self, name):
         """Get a sub-collection of this collection by name.
@@ -300,7 +300,6 @@ class Collection(object):
            The `spec_or_object_id` parameter is now optional. If it is
            not specified *all* documents in the collection will be
            removed.
-
         .. versionadded:: 1.1
            The `safe` parameter.
         """
@@ -318,7 +317,7 @@ class Collection(object):
             message.delete(self.__full_name, spec, safe), safe)
 
     def find_one(self, spec_or_object_id=None, fields=None, slave_okay=None,
-                 _sock=None, _must_use_master=False):
+                 _sock=None, _must_use_master=False, _is_command=False):
         """Get a single object from the database.
 
         Raises TypeError if the argument is of an improper type. Returns a
@@ -342,7 +341,8 @@ class Collection(object):
 
         for result in self.find(spec, limit=-1, fields=fields,
                                 slave_okay=slave_okay, _sock=_sock,
-                                _must_use_master=_must_use_master):
+                                _must_use_master=_must_use_master,
+                                _is_command=_is_command):
             return result
         return None
 
@@ -365,7 +365,7 @@ class Collection(object):
 
     def find(self, spec=None, fields=None, skip=0, limit=0,
              slave_okay=None, timeout=True, snapshot=False, tailable=False,
-             _sock=None, _must_use_master=False):
+             _sock=None, _must_use_master=False, _is_command=False):
         """Query the database.
 
         The `spec` argument is a prototype document that all results must
@@ -448,7 +448,8 @@ class Collection(object):
 
         return Cursor(self, spec, fields, skip, limit, slave_okay, timeout,
                       tailable, snapshot, _sock=_sock,
-                      _must_use_master=_must_use_master)
+                      _must_use_master=_must_use_master,
+                      _is_command=_is_command)
 
     def count(self):
         """Get the number of documents in this collection.
@@ -587,10 +588,10 @@ class Collection(object):
 
         self.__database.connection._purge_index(self.__database.name,
                                                 self.__name, name)
-        self.__database._command(SON([("deleteIndexes",
-                                       self.__name),
-                                      ("index", name)]),
-                                 ["ns not found"])
+        self.__database.command(SON([("deleteIndexes",
+                                      self.__name),
+                                     ("index", name)]),
+                                ["ns not found"])
 
     def index_information(self):
         """Get information on this collection's indexes.
@@ -625,20 +626,26 @@ class Collection(object):
 
         return options
 
-    # TODO send all groups as commands once 1.2 is out
-    #
-    # Waiting on this because group command support for CodeWScope
-    # wasn't added until 1.1
-    def group(self, keys, condition, initial, reduce, finalize=None,
+    # TODO key and condition ought to be optional, but deprecation
+    # could be painful as argument order would have to change.
+    def group(self, key, condition, initial, reduce, finalize=None,
               command=True):
-        """Perform a query similar to an SQL group by operation.
+        """Perform a query similar to an SQL *group by* operation.
 
         Returns an array of grouped items.
 
+        The `key` parameter can be:
+
+          - ``None`` to use the entire document as a key.
+          - A :class:`list` of keys (each a :class:`basestring`) to group by.
+          - A :class:`basestring` or :class:`~pymongo.code.Code` instance
+            containing a JavaScript function to be applied to each document,
+            returning the key to group by.
+
         :Parameters:
-          - `keys`: list of fields to group by
-          - `condition`: specification of rows to be considered (as a `find`
-            query specification)
+          - `key`: fields to group by (see above description)
+          - `condition`: specification of rows to be
+            considered (as a :meth:`find` query specification)
           - `initial`: initial value of the aggregation counter object
           - `reduce`: aggregation function as a JavaScript string
           - `finalize`: function to be called on each object in output list.
@@ -646,77 +653,30 @@ class Collection(object):
             command instead of in an eval - this option is deprecated and
             will be removed in favor of running all groups as commands
 
+        .. versionchanged:: 1.3+
+           The `key` argument can now be ``None`` or a JavaScript function,
+           in addition to a :class:`list` of keys.
         .. versionchanged:: 1.3
            The `command` argument now defaults to ``True`` and is deprecated.
         """
-
-        #for now support people passing command in its old position
-        if finalize in (True, False):
-            command = finalize
-            finalize = None
-            warnings.warn("Please only pass 'command' as a keyword argument.",
+        if not command:
+            warnings.warn("eval-based groups are deprecated, and the "
+                          "command option will be removed.",
                           DeprecationWarning)
 
-        if command:
-            if not isinstance(reduce, Code):
-                reduce = Code(reduce)
-            group = {"ns": self.__name,
-                    "$reduce": reduce,
-                    "key": self._fields_list_to_dict(keys),
-                    "cond": condition,
-                    "initial": initial}
-            if finalize is not None:
-                if not isinstance(finalize, Code):
-                    finalize = Code(finalize)
-                group["finalize"] = finalize
-            return self.__database._command({"group":group})["retval"]
+        group = {}
+        if isinstance(key, basestring):
+            group["$keyf"] = Code(key)
+        elif key is not None:
+            group = {"key": self._fields_list_to_dict(key)}
+        group["ns"] = self.__name
+        group["$reduce"] = Code(reduce)
+        group["cond"] = condition
+        group["initial"] = initial
+        if finalize is not None:
+            group["finalize"] = Code(finalize)
 
-        warnings.warn("eval-based groups are deprecated. please use command=True.",
-                      DeprecationWarning)
-
-        scope = {}
-        if isinstance(reduce, Code):
-            scope = reduce.scope
-        scope.update({"ns": self.__name,
-                      "keys": keys,
-                      "condition": condition,
-                      "initial": initial})
-
-        group_function = """function () {
-    var c = db[ns].find(condition);
-    var map = new Map();
-    var reduce_function = %s;
-    var finalize_function = %s; //function or null
-    while (c.hasNext()) {
-        var obj = c.next();
-
-        var key = {};
-        for (var i = 0; i < keys.length; i++) {
-            var k = keys[i];
-            key[k] = obj[k];
-        }
-
-        var aggObj = map.get(key);
-        if (aggObj == null) {
-            var newObj = Object.extend({}, key);
-            aggObj = Object.extend(newObj, initial);
-            map.put(key, aggObj);
-        }
-        reduce_function(obj, aggObj);
-    }
-
-    out = map.values();
-    if (finalize_function !== null){
-        for (var i=0; i < out.length; i++){
-            var ret = finalize_function(out[i]);
-            if (ret !== undefined)
-                out[i] = ret;
-        }
-    }
-
-    return {"result": out};
-}""" % (reduce, (finalize or 'null'));
-        return self.__database.eval(Code(group_function, scope))["result"]
+        return self.__database.command({"group":group})["retval"]
 
     def rename(self, new_name):
         """Rename this collection.
@@ -743,7 +703,7 @@ class Collection(object):
                               ("to", "%s.%s" % (self.__database.name,
                                                 new_name))])
 
-        self.__database.connection.admin._command(rename_command)
+        self.__database.connection.admin.command(rename_command)
 
     def distinct(self, key):
         """Get a list of distinct values for `key` among all documents in this
@@ -795,7 +755,7 @@ class Collection(object):
                        ("map", map), ("reduce", reduce)])
         command.update(**kwargs)
 
-        response = self.__database._command(command)
+        response = self.__database.command(command)
         if full_response:
             return response
         return self.__database[response["result"]]

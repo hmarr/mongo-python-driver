@@ -5,19 +5,36 @@ Frequently Asked Questions
 
 Is PyMongo thread-safe?
 -----------------------
+
 PyMongo is thread-safe and even provides built-in connection pooling
-for threaded applications. See the documentation for
-:class:`~pymongo.connection.Connection`, notably the `pool_size`
-parameter.
+for threaded applications.
+
+How does connection pooling work in PyMongo?
+--------------------------------------------
+
+Every :class:`~pymongo.connection.Connection` instance has built-in
+connection pooling. Each thread gets its own socket reserved on its
+first operation. Those sockets are held until
+:meth:`~pymongo.connection.Connection.end_request` is called by that
+thread, or :meth:`~pymongo.connection.Connection.disconnect` is called
+by any thread, or the thread dies.
+
+Calling :meth:`~pymongo.connection.Connection.end_request` allows the
+socket to be returned to the pool, and to be used by other threads
+instead of creating a new socket. Judicious use of this method is
+important for applications with many threads or with long running
+threads that make few calls to PyMongo operations.
 
 How can I use PyMongo with an asynchronous socket library like `twisted <http://twistedmatrix.com/>`_?
 ------------------------------------------------------------------------------------------------------
+
 Currently there is no great way to use PyMongo in conjunction with
 asynchronous socket frameworks like `twisted
 <http://twistedmatrix.com/>`_ or `tornado
-<http://www.tornadoweb.org/>`_. One way to get the same benefits those
-frameworks provide using PyMongo is to write multi-threaded code and
-use PyMongo's built in connection pooling.
+<http://www.tornadoweb.org/>`_. PyMongo provides built-in connection
+pooling, so some of the benefits of those frameworks can be achieved
+just by writing multi-threaded code that shares a
+:class:`~pymongo.connection.Connection`.
 
 There is work in progress towards creating an `asynchronous Python
 driver <http://github.com/fiorix/mongo-async-python-driver>`_ for
@@ -108,12 +125,7 @@ How can I use PyMongo from a web framework like Django?
 -------------------------------------------------------
 `Django <http://www.djangoproject.com/>`_ is a popular Python web
 framework. Django includes an ORM, :mod:`django.db`. Currently,
-MongoDB is not supported as a back-end for :mod:`django.db`. There has
-been `some discussion
-<http://simonwillison.net/2009/Jun/30/mongodb/#c46834>`_ over whether
-or not work should be done towards writing a MongoDB back-end, and
-`some work <http://bitbucket.org/kpot/django-mongodb/>`_ has already
-started towards that goal.
+MongoDB is not supported as a back-end for :mod:`django.db`.
 
 That being said, it's easy to use MongoDB (and PyMongo) from Django
 without using such a project. Certain features of Django that require
@@ -129,6 +141,11 @@ Django. The main point is that your persistence code will go directly
 into your views, rather than being defined in separate models. The
 README also gives instructions for how to change settings.py to
 disable the features that won't work with MongoDB.
+
+One project which should make working with MongoDB and Django easier
+is `mango <http://github.com/vpulim/mango>`_. Mango is a set of
+MongoDB backends for Django sessions and authentication (bypassing
+:mod:`django.db` entirely).
 
 .. _using-with-mod-wsgi:
 

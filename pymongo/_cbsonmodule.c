@@ -174,20 +174,12 @@ static int buffer_write_bytes(bson_buffer* buffer, const char* bytes, int size) 
 
 /* returns 0 on failure */
 static int write_string(bson_buffer* buffer, PyObject* py_string) {
-    int i;
     Py_ssize_t string_length;
     const char* string = PyString_AsString(py_string);
     if (!string) {
         return 1;
     }
     string_length = PyString_Size(py_string) + 1;
-
-    for (i = 0; i < string_length - 1; i++) {
-        if (string[i] == 0) {
-            PyErr_SetString(InvalidStringData, "BSON strings must not contain a NULL character");
-            return 0;
-        }
-    }
 
     if (!buffer_write_bytes(buffer, (const char*)&string_length, 4)) {
         return 0;
@@ -393,10 +385,12 @@ static int write_element_to_buffer(bson_buffer* buffer, int type_byte, PyObject*
         return 1;
     } else if (PyString_Check(value)) {
         int result;
+        result_t status;
 
         *(buffer->buffer + type_byte) = 0x02;
-        if (!is_legal_utf8_string((const unsigned char*)PyString_AsString(value),
-                                  PyString_Size(value))) {
+        status = check_string((const unsigned char*)PyString_AsString(value),
+                              PyString_Size(value), 1, 0);
+        if (status == NOT_UTF_8) {
             PyErr_SetString(InvalidStringData,
                             "strings in documents must be valid UTF-8");
             return 0;
@@ -475,8 +469,10 @@ static int write_element_to_buffer(bson_buffer* buffer, int type_byte, PyObject*
         PyObject* encoded_pattern;
         long int_flags;
         char flags[FLAGS_SIZE];
+        char check_utf8 = 0;
         int pattern_length,
             flags_length;
+        result_t status;
 
         if (!py_flags) {
             return 0;
@@ -496,6 +492,19 @@ static int write_element_to_buffer(bson_buffer* buffer, int type_byte, PyObject*
             }
         } else {
             encoded_pattern = py_pattern;
+            check_utf8 = 1;
+        }
+
+        status = check_string((const unsigned char*)PyString_AsString(encoded_pattern),
+                              PyString_Size(encoded_pattern), check_utf8, 1);
+        if (status == NOT_UTF_8) {
+            PyErr_SetString(InvalidStringData,
+                            "regex patterns must be valid UTF-8");
+            return 0;
+        } else if (status == HAS_NULL) {
+            PyErr_SetString(InvalidDocument,
+                            "regex patterns must not contain the NULL byte");
+            return 0;
         }
 
         {
@@ -656,18 +665,34 @@ static int decode_and_write_pair(bson_buffer* buffer, PyObject* key,
                                  PyObject* value, unsigned char check_keys) {
     PyObject* encoded;
     if (PyUnicode_Check(key)) {
+        result_t status;
         encoded = PyUnicode_AsUTF8String(key);
         if (!encoded) {
             return 0;
         }
+        status = check_string((const unsigned char*)PyString_AsString(encoded),
+                              PyString_Size(encoded), 0, 1);
+
+        if (status == HAS_NULL) {
+            PyErr_SetString(InvalidDocument,
+                            "Key names must not contain the NULL byte");
+            return 0;
+        }
     } else if (PyString_Check(key)) {
+        result_t status;
         encoded = key;
         Py_INCREF(encoded);
 
-        if (!is_legal_utf8_string((const unsigned char*)PyString_AsString(encoded),
-                                  PyString_Size(encoded))) {
+        status = check_string((const unsigned char*)PyString_AsString(encoded),
+                                       PyString_Size(encoded), 1, 1);
+
+        if (status == NOT_UTF_8) {
             PyErr_SetString(InvalidStringData,
                             "strings in documents must be valid UTF-8");
+            return 0;
+        } else if (status == HAS_NULL) {
+            PyErr_SetString(InvalidDocument,
+                            "Key names must not contain the NULL byte");
             return 0;
         }
     } else {
@@ -878,6 +903,75 @@ static PyObject* _cbson_insert_message(PyObject* self, PyObject* args) {
             buffer_free(buffer);
             return NULL;
         }
+    }
+
+    memcpy(buffer->buffer + length_location, &buffer->position, 4);
+
+    if (safe) {
+        if (!add_last_error(buffer, request_id)) {
+            buffer_free(buffer);
+            return NULL;
+        }
+    }
+
+    /* objectify buffer */
+    result = Py_BuildValue("is#", request_id,
+                           buffer->buffer, buffer->position);
+    buffer_free(buffer);
+    return result;
+}
+
+static PyObject* _cbson_update_message(PyObject* self, PyObject* args) {
+    /* NOTE just using a random number as the request_id */
+    int request_id = rand();
+    char* collection_name;
+    int collection_name_length;
+    PyObject* doc;
+    PyObject* spec;
+    unsigned char multi;
+    unsigned char upsert;
+    unsigned char safe;
+    int options;
+    bson_buffer* buffer;
+    int length_location;
+    PyObject* result;
+
+    if (!PyArg_ParseTuple(args, "s#bbOOb",
+                          &collection_name,
+                          &collection_name_length,
+                          &upsert, &multi, &spec, &doc, &safe)) {
+        return NULL;
+    }
+
+    options = 0;
+    if (upsert) {
+        options += 1;
+    }
+    if (multi) {
+        options += 2;
+    }
+    buffer = buffer_new();
+    if (!buffer) {
+        return NULL;
+    }
+
+    // save space for message length
+    length_location = buffer_save_bytes(buffer, 4);
+    if (length_location == -1 ||
+        !buffer_write_bytes(buffer, (const char*)&request_id, 4) ||
+        !buffer_write_bytes(buffer,
+                            "\x00\x00\x00\x00"
+                            "\xd1\x07\x00\x00"
+                            "\x00\x00\x00\x00",
+                            12) ||
+        !buffer_write_bytes(buffer,
+                            collection_name,
+                            collection_name_length + 1) ||
+        !buffer_write_bytes(buffer, (const char*)&options, 4) ||
+        !write_dict(buffer, spec, 0) ||
+        !write_dict(buffer, doc, 0)) {
+        buffer_free(buffer);
+        return NULL;
     }
 
     memcpy(buffer->buffer + length_location, &buffer->position, 4);
@@ -1315,6 +1409,8 @@ static PyMethodDef _CBSONMethods[] = {
      "convert binary data to a sequence of SON objects."},
     {"_insert_message", _cbson_insert_message, METH_VARARGS,
      "create an insert message to be sent to MongoDB"},
+    {"_update_message", _cbson_update_message, METH_VARARGS,
+     "create an update message to be sent to MongoDB"},
     {NULL, NULL, 0, NULL}
 };
 

@@ -38,7 +38,7 @@ class Cursor(object):
 
     def __init__(self, collection, spec, fields, skip, limit, slave_okay,
                  timeout, tailable, snapshot=False,
-                 _sock=None, _must_use_master=False):
+                 _sock=None, _must_use_master=False, _is_command=False):
         """Create a new cursor.
 
         Should not be called directly by application developers.
@@ -57,6 +57,7 @@ class Cursor(object):
         self.__hint = None
         self.__socket = _sock
         self.__must_use_master = _must_use_master
+        self.__is_command = _is_command
 
         self.__data = []
         self.__id = None
@@ -125,6 +126,8 @@ class Cursor(object):
     def __query_spec(self):
         """Get the spec to use for a query.
         """
+        if self.__is_command:
+            return self.__spec
         spec = SON({"query": self.__spec})
         if self.__ordering:
             spec["orderby"] = self.__ordering
@@ -304,8 +307,7 @@ class Cursor(object):
             if self.__skip:
                 command["skip"] = self.__skip
 
-        response = self.__collection.database._command(command,
-                                                       ["ns missing"])
+        response = self.__collection.database.command(command, ["ns missing"])
         if response.get("errmsg", "") == "ns missing":
             return 0
         return int(response["n"])
@@ -334,7 +336,7 @@ class Cursor(object):
         if self.__spec:
             command["query"] = self.__spec
 
-        return self.__collection.database._command(command)["values"]
+        return self.__collection.database.command(command)["values"]
 
     def explain(self):
         """Returns an explain plan record for this cursor.

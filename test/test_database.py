@@ -182,11 +182,11 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(None, db.error())
         self.assertEqual(None, db.previous_error())
 
-        db._command({"forceerror": 1}, check=False)
+        db.command({"forceerror": 1}, check=False)
         self.assert_(db.error())
         self.assert_(db.previous_error())
 
-        db._command({"forceerror": 1}, check=False)
+        db.command({"forceerror": 1}, check=False)
         self.assert_(db.error())
         prev_error = db.previous_error()
         self.assertEqual(prev_error["nPrev"], 1)
@@ -227,13 +227,14 @@ class TestDatabase(unittest.TestCase):
                          u"cd7e45b3b2767dc2fa9b6b548457ed00")
         self.assertEqual(db._password_digest("mike", "password"),
                          db._password_digest(u"mike", u"password"))
+        self.assertEqual(db._password_digest("Gustave", u"Dor\xe9"),
+                         u"81e0e2364499209f466e75926a162d73")
 
-    def test_authenticate(self):
+    def test_authenticate_add_remove_user(self):
         db = self.connection.pymongo_test
         db.system.users.remove({})
-        db.system.users.insert({"user": u"mike",
-                                "pwd": db._password_digest("mike",
-                                                           "password")})
+        db.remove_user("mike")
+        db.add_user("mike", "password")
 
         self.assertRaises(TypeError, db.authenticate, 5, "password")
         self.assertRaises(TypeError, db.authenticate, "mike", 5)
@@ -242,6 +243,17 @@ class TestDatabase(unittest.TestCase):
         self.failIf(db.authenticate("faker", "password"))
         self.assert_(db.authenticate("mike", "password"))
         self.assert_(db.authenticate(u"mike", u"password"))
+
+        db.remove_user("mike")
+        self.failIf(db.authenticate("mike", "password"))
+
+        self.failIf(db.authenticate("Gustave", u"Dor\xe9"))
+        db.add_user("Gustave", u"Dor\xe9")
+        self.assert_(db.authenticate("Gustave", u"Dor\xe9"))
+
+        db.add_user("Gustave", "password")
+        self.failIf(db.authenticate("Gustave", u"Dor\xe9"))
+        self.assert_(db.authenticate("Gustave", u"password"))
 
         # just make sure there are no exceptions here
         db.logout()

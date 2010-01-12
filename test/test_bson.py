@@ -19,19 +19,15 @@
 import unittest
 import datetime
 import re
-import glob
 import sys
-import types
-
 try:
     import uuid
     should_test_uuid = True
 except ImportError:
     should_test_uuid = False
+sys.path[0:0] = [""]
 
 from nose.plugins.skip import SkipTest
-
-sys.path[0:0] = [""]
 
 import qcheck
 from pymongo.binary import Binary
@@ -40,7 +36,7 @@ from pymongo.objectid import ObjectId
 from pymongo.dbref import DBRef
 from pymongo.son import SON
 from pymongo.bson import BSON, is_valid, _to_dicts
-from pymongo.errors import UnsupportedTag, InvalidDocument, InvalidStringData
+from pymongo.errors import InvalidDocument, InvalidStringData
 
 
 class TestBSON(unittest.TestCase):
@@ -141,10 +137,6 @@ class TestBSON(unittest.TestCase):
                          "\x00\x05\x00\x00\x00coll\x00\x07$id\x00\x00\x01\x02"
                          "\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x00\x00")
 
-    def test_null_character_encoding(self):
-        self.assertRaises(InvalidStringData, BSON.from_dict, {"with zero": "hello\x00world"})
-        self.assertRaises(InvalidStringData, BSON.from_dict, {"with zero": u"hello\x00world"})
-
     def test_from_then_to_dict(self):
 
         def helper(dict):
@@ -153,7 +145,7 @@ class TestBSON(unittest.TestCase):
         helper({"test": u"hello"})
         self.assert_(isinstance(BSON.from_dict({"hello": "world"})
                                 .to_dict()["hello"],
-                                   types.UnicodeType))
+                                unicode))
         helper({"mike": -10120})
         helper({"long": long(10)})
         helper({"really big long": 2147483648})
@@ -176,43 +168,6 @@ class TestBSON(unittest.TestCase):
 
         qcheck.check_unittest(self, from_then_to_dict,
                               qcheck.gen_mongo_dict(3))
-
-    def test_data_files(self):
-        # TODO don't hardcode this, actually clone the repo
-        data_files = "../mongo-qa/modules/bson_tests/tests/*/*.xson"
-        generate = True
-
-        for file_name in glob.glob(data_files):
-            f = open(file_name, "r")
-            xml = f.read()
-            f.close()
-
-            try:
-                doc = SON.from_xml(xml)
-                bson = BSON.from_dict(doc)
-            except UnsupportedTag:
-                print "skipped file %s: %s" % (file_name, sys.exc_info()[1])
-                continue
-
-            try:
-                f = open(file_name.replace(".xson", ".bson"), "rb")
-                expected = f.read()
-                f.close()
-
-                self.assertEqual(bson, expected,
-                                 "(in %s) %r != %r" % (file_name, bson,
-                                                       expected))
-                self.assertEqual(doc, bson.to_dict(),
-                                 "(in %s) %r != %r" % (file_name, doc,
-                                                       bson.to_dict()))
-
-            except IOError:
-                if generate:
-                    print "generating .bson for %s" % file_name
-
-                    f = open(file_name.replace(".xson", ".bson"), "w")
-                    f.write(bson)
-                    f.close()
 
     def test_bad_encode(self):
         self.assertRaises(InvalidStringData, BSON.from_dict,
@@ -264,6 +219,19 @@ class TestBSON(unittest.TestCase):
 
         z = {u"aé".encode("iso-8859-1"): "hello"}
         self.assertRaises(InvalidStringData, BSON.from_dict, z)
+
+    def test_null_character(self):
+        doc = {"a": "\x00"}
+        self.assertEqual(doc, BSON.from_dict(doc).to_dict())
+
+        doc = {"a": u"\x00"}
+        self.assertEqual(doc, BSON.from_dict(doc).to_dict())
+
+        self.assertRaises(InvalidDocument, BSON.from_dict, {"\x00": "a"})
+        self.assertRaises(InvalidDocument, BSON.from_dict, {u"\x00": "a"})
+
+        self.assertRaises(InvalidDocument, BSON.from_dict, {"a": re.compile("ab\x00c")})
+        self.assertRaises(InvalidDocument, BSON.from_dict, {"a": re.compile(u"ab\x00c")})
 
 # TODO this test doesn't pass w/ C extension
 #
