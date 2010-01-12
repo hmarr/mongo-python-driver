@@ -233,7 +233,7 @@ class Cursor(object):
 
             if index.stop is not None:
                 limit = index.stop - skip
-                if limit <= 0:
+                if limit < 0:
                     raise IndexError("stop index must be greater than start index for slice %r" % index)
             else:
                 limit = 0
